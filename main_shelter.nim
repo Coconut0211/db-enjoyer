@@ -1,6 +1,5 @@
-import parsecsv,re,strutils,times  # используйте для чтения ваших csv файлов
+import parsecsv,strutils,times,sequtils  # используйте для чтения ваших csv файлов
 import db_connector/db_sqlite  # или norm/[model, sqlite]
-import shelter/[functions],shelter/[types]
 
 
 # Реализуйте функции чтения и преобразования csv записи
@@ -9,52 +8,101 @@ import shelter/[functions],shelter/[types]
 # Создайте таблицы в базе данных.
 # Реализуйте загрузку экземпляра объекта в соответствующую таблицу.
 
+type
+  Role* = enum
+    NONE, Директор, Бухгалтер, Ветеринар
+  Post* = object
+    dol*: Role
+    glavn*: bool
+  Person* = ref object of RootObj
+    firstname*: string
+    lastname*: string
+    birthDate*: int64
+  Manager* = ref object of Person
+    post*: Post
+  Staff* = ref object of Person
+    uid*: int
+  Pet* = ref object of RootObj
+    name*: string
+    age*: int 
+  Shelter* = ref object of RootObj
+    staff*: seq[Staff]
+    pet*: seq[Pet]
+    manager*: seq[Manager]
+
+proc `$`*(self: Manager): string = 
+  var glavn = 0
+  if self.post.glavn:
+    glavn = 1
+  "('$1', '$2', $3, '$4', $5)" % [
+  self.firstname,
+  self.lastname,
+  $self.birthDate,
+  $self.post.dol,
+  $glavn
+  ]
+
+proc `$`*(self: Staff): string = 
+  "('$1', '$2', $3, $4)" % [
+  self.firstname,
+  self.lastname,
+  $self.birthDate,
+  $self.uid,
+  ]
+
+proc `$`*(self: Pet): string =
+  return "('$1', $2)" % [
+  self.name,
+  $self.age,
+  ]
+
+proc toUnix(date: string): int64 =
+  try:
+    return date.parse("dd'.'MM'.'YYYY").toTime.toUnix
+  except TimeParseError:
+    stderr.write(getCurrentExceptionMsg() & "\n")
+    return result
+
 proc rowToManager(row: seq[string]): Manager =
   var isGlavn = false
   var dolzn = row[3].split()[0]
   if dolzn == "Главный":
     isGlavn = true
     dolzn = row[3].split()[1]
-  initManager(a,row[0],row[1],dolzn,row[2],isGlavn)
-  return a
+  Manager(firstname: row[0],lastname: row[1], birthdate: toUnix(row[2]), post: Post(dol: parseEnum[Role](dolzn),glavn: isGlavn))
 
 proc readManagers(file: string): seq[Manager] =
   var parser: CsvParser
-  var res: seq[Manager]
   parser.open(file)
   parser.readHeaderRow()
-  while  parser.readRow:
-    res.add(rowToManager(parser.row))
-  parser.close
-  return res
+  while  parser.readRow():
+    result.add(rowToManager(parser.row))
+  parser.close()
+  return result
 
 proc rowToPet(row: seq[string]): Pet =
-  initPet(a,row[0],row[1].parseInt())
-  return a
+  Pet(name: row[0],age: row[1].parseInt())
 
 proc readPets(file: string): seq[Pet] =
   var parser: CsvParser
-  var res: seq[Pet]
   parser.open(file)
   parser.readHeaderRow()
-  while  parser.readRow:
-    res.add(rowToPet(parser.row))
-  parser.close
-  return res
+  while  parser.readRow():
+    result.add(rowToPet(parser.row))
+  parser.close()
+  return result
 
 proc rowToStaff(row: seq[string]): Staff =
-  initStaff(a,row[0],row[1],row[2],row[3].parseInt)
-  return a
+  Staff(firstname: row[0],lastname: row[1],birthdate: toUnix(row[2]),uid: row[3].parseInt)
 
 proc readStaff(file: string): seq[Staff] =
   var parser: CsvParser
-  var res: seq[Staff]
   parser.open(file)
   parser.readHeaderRow()
-  while  parser.readRow:
-    res.add(rowToStaff(parser.row))
-  parser.close
-  return res
+  while  parser.readRow():
+    result.add(rowToStaff(parser.row))
+  parser.close()
+  return result
 
 proc createTable(db: DbConn, tableName: string,fields: varargs[string]) =
   let query = """
@@ -64,40 +112,33 @@ proc createTable(db: DbConn, tableName: string,fields: varargs[string]) =
   )""" % [tableName,fields.join(",")]
   db.exec(sql(query))
 
-proc insert(db: DbConn,tableName,fields: string,values: varargs[string,`$`]): int64 = 
-  let query = "INSERT INTO $1 ($2) VALUES $3" % [tableName,fields,values.join(",")]
+proc insert(db: DbConn,tableName,fields: string,values: seq): int64 = 
+  let query = "INSERT INTO $1 ($2) VALUES $3" % [tableName,fields,values.mapIt($it).join(",")]
   db.tryInsertID(sql(query))
 
-template insertAll(db: DbConn,tableName,fields: string, data: seq[auto]) =
-  for el in data:
-    if db.insert(tableName,fields,el) == -1:
-      echo "Error:",el
-  
 when isMainModule:
   let db = open("shelter.db", "", "", "")
-  let manager = readManagers("data/shelter_managers.csv")
   db.createTable(
     "Manager",
     "firstname VARCHAR(25)",
     "lastname VARCHAR(25)",
-    "birthdate VARCHAR(12)",
-    "post VARCHAR(12)"
+    "birthdate UNSIGNED INTEGER",
+    "post VARCHAR(12)",
+    "glavn BOOLEAN"
     )
-  insertAll(db,"Manager","firstname, lastname, birthdate, post",manager)
-  let pets = readPets("data/shelter_pets.csv")
+  echo db.insert("Manager","firstname, lastname, birthdate, post, glavn",readManagers("data/shelter_managers.csv"))
   db.createTable(
     "Pet",
     "name VARCHAR(25)",
     "age UNSIGNED INTEGER"
     )
-  insertAll(db,"Pet","name, age",pets)
-  let staff = readStaff("data/shelter_staff.csv")
+  echo db.insert("Pet","name, age",readPets("data/shelter_pets.csv"))
   db.createTable(
     "Staff",
     "firstname VARCHAR(25)",
     "lastname VARCHAR(25)",
-    "birthdate VARCHAR(12)",
+    "birthdate UNSIGNED INTEGER",
     "uid UNSIGNED INTEGER"
     )
-  insertAll(db,"Staff","firstname, lastname, birthdate, uid",staff)
+  echo db.insert("Staff","firstname, lastname, birthdate, uid",readStaff("data/shelter_staff.csv"))
   db.close()

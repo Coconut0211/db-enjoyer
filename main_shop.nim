@@ -1,6 +1,5 @@
-import parsecsv,re,strutils,times  # используйте для чтения ваших csv файлов
+import parsecsv,strutils,times,sequtils  # используйте для чтения ваших csv файлов
 import db_connector/db_sqlite  # или norm/[model, sqlite]
-import shop/[functions],shop/[types]
 
 
 # Реализуйте функции чтения и преобразования csv записи
@@ -8,48 +7,103 @@ import shop/[functions],shop/[types]
 
 # Создайте таблицы в базе данных.
 # Реализуйте загрузку экземпляра объекта в соответствующую таблицу.
+type
+  Post* = enum
+    NONE, Кассир, Уборщик, Консультант, Менеджер, Директор
+
+  Staff* = ref object of RootObj
+    firstName*: string
+    lastName*: string
+    birthDate*: int64
+    post*: Post
+
+  Good* = ref object of RootObj
+    title*: string
+    price*: float
+    endDate*: int64
+    discount*: float
+    count*: int
+
+  Cash* = ref object of RootObj
+    number*: int
+    free*: bool
+    totalCash*: float
+
+  Shop* = ref object of RootObj
+    staff*: seq[Staff]
+    goods*: seq[Good]
+    cashes*: seq[Cash]
+
+proc `$`*(self: Staff): string =
+  "('$1', '$2', $3, '$4')" % [
+    self.firstName,
+    self.lastName,
+    $self.birthDate,
+    $self.post,
+  ]
+
+proc `$`*(self: Good): string =
+  "('$1', $2, $3, $4, $5)" % [
+    self.title.replace("'","''"),
+    $self.price,
+    $self.endDate,
+    $self.discount,
+    $self.count
+  ]
+
+proc `$`*(self: Cash): string =
+  var status: int
+  if self.free:
+    status = 1
+  else:
+    status = 0
+  "($1, $2, $3)" % [
+    $self.number,
+    $status,
+    $self.totalCash
+  ]
+
+proc toUnix(date: string): int64 =
+  try:
+    return date.parse("dd'.'MM'.'YYYY").toTime.toUnix
+  except TimeParseError:
+    stderr.write(getCurrentExceptionMsg() & "\n")
+    return result
 
 proc rowToStaff(row: seq[string]): Staff =
-  initStaff(a,row[0],row[1],row[2],row[3])
-  return a
+  return Staff(firstName: row[0], lastName: row[1],birthDate: toUnix(row[2]),post: parseEnum[Post](row[3]))
 
 proc readStaff(file: string): seq[Staff] =
   var parser: CsvParser
-  var res: seq[Staff]
   parser.open(file)
   parser.readHeaderRow()
-  while  parser.readRow:
-    res.add(rowToStaff(parser.row))
-  parser.close
-  return res
+  while  parser.readRow():
+    result.add(rowToStaff(parser.row))
+  parser.close()
+  return result
 
-proc rowToGood(row: seq[string],title: string): Good =
-  initGood(a,title,row[1].parseFloat,row[2],row[3].parseFloat / 100,row[4].parseInt)
-  return a
+proc rowToGood(row: seq[string]): Good =
+   return Good(title: row[0],price: row[1].parseFloat,endDate: toUnix(row[2]), discount: row[3].parseFloat, count: row[4].parseInt)
 
 proc readGoods(file: string): seq[Good] =
   var parser: CsvParser
-  var res: seq[Good]
   parser.open(file)
   parser.readHeaderRow()
-  while  parser.readRow:
-    res.add(rowToGood(parser.row,parser.rowEntry("title")))
-  parser.close
-  return res
+  while  parser.readRow():
+    result.add(rowToGood(parser.row))
+  parser.close()
+  return result
 
 proc rowToCash(row: seq[string]): Cash =
-  initCash(a,row[0].parseInt,row[1].parseBool,row[2].parseFloat)
-  return a
+  return Cash(number: row[0].parseInt,free: row[1].parseBool,totalCash: row[2].parseFloat)
 
 proc readCash(file: string): seq[Cash] =
   var parser: CsvParser
-  var res: seq[Cash]
   parser.open(file)
   parser.readHeaderRow()
-  while  parser.readRow:
-    res.add(rowToCash(parser.row))
-  parser.close
-  return res
+  while  parser.readRow():
+    result.add(rowToCash(parser.row))
+  parser.close()
 
 proc createTable(db: DbConn, tableName: string,fields: varargs[string]) =
   let query = """
@@ -59,42 +113,34 @@ proc createTable(db: DbConn, tableName: string,fields: varargs[string]) =
   )""" % [tableName,fields.join(",")]
   db.exec(sql(query))
 
-proc insert(db: DbConn,tableName,fields: string,values: varargs[string,`$`]): int64 = 
-  let query = "INSERT INTO $1 ($2) VALUES $3" % [tableName,fields,values.join(",")]
+proc insert(db: DbConn,tableName,fields: string,values: seq): int64 = 
+  let query = "INSERT INTO $1 ($2) VALUES $3" % [tableName,fields,values.mapIt($it).join(",")]
   db.tryInsertID(sql(query))
-
-template insertAll(db: DbConn,tableName,fields: string, data: seq[auto]) =
-  for el in data:
-    if db.insert(tableName,fields,el) == -1:
-      echo "Error:",el
 
 when isMainModule:
   let db = open("shop.db", "", "", "")
-  let staff = readStaff("data/shop_staff.csv")
   db.createTable(
     "Staff",
     "firstname VARCHAR(25)",
     "lastname VARCHAR(25)",
-    "birthdate VARCHAR(12)",
+    "birthdate UNSIGNED INTEGER",
     "post VARCHAR(25)"
     )
-  insertAll(db,"Staff","firstname, lastname, birthdate,post",staff)
-  let goods = readGoods("data/shop_goods.csv")
+  echo db.insert("Staff","firstname, lastname, birthdate,post",readStaff("data/shop_staff.csv"))
   db.createTable(
     "Good",
     "title VARCHAR(80)",
     "price UNSIGNED FLOAT",
-    "enddate VARCHAR(25)",
+    "enddate UNSIGNED INTEGER",
     "discount UNSIGNED FLOAT",
     "count UNSIGNED INTEGER"
     )
-  insertAll(db,"Good","title, price, enddate, discount, count",goods)
-  let cashes = readCash("data/shop_cashes.csv")
+  echo db.insert("Good","title, price, enddate, discount, count",readGoods("data/shop_goods.csv"))
   db.createTable(
     "Cash",
     "number UNSIGNED INTEGER",
     "free BOOLEAN",
     "totalcash UNSIGNED FLOAT",
     )
-  insertAll(db,"Cash","number, free, totalcash",cashes)
+  echo db.insert("Cash","number, free, totalcash",readCash("data/shop_cashes.csv"))
   db.close()

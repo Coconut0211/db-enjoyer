@@ -1,6 +1,5 @@
-import parsecsv,re,strutils,times  # используйте для чтения ваших csv файлов
+import parsecsv,re,strutils,times,sequtils  # используйте для чтения ваших csv файлов
 import db_connector/db_sqlite  # или norm/[model, sqlite]
-import school/[functions],school/[types]
 
 
   
@@ -10,47 +9,90 @@ import school/[functions],school/[types]
 # Создайте таблицы в базе данных.
 # Реализуйте загрузку экземпляра объекта в соответствующую таблицу.
 
+type
+  Subjects* = enum
+    NONE, История, География, Математика, Биология
+  Person* = ref object of RootObj
+    firstname*: string
+    lastname*: string
+    birthDate*: int64
+  Director* = ref object of Person
+  Teacher* = ref object of Person
+    subject*: Subjects
+  Student* = ref object of Person
+    classNum*: int
+    classLet*: char
+  School* = ref object of RootObj
+    director*: Director
+    students*: seq[Student]
+    teachers*: seq[Teacher]
+
+proc `$`*(self: Director): string = 
+  "('$1', '$2', $3)" % [
+  self.firstname,
+  self.lastname,
+  $self.birthDate
+  ]
+
+proc `$`*(self: Teacher): string = 
+  "('$1', '$2', $3, '$4')" % [
+  self.firstname,
+  self.lastname,
+  $self.birthDate,
+  $self.subject,
+  ]
+
+proc `$`*(self: Student): string = 
+  "('$1', '$2', $3, $4, '$5')" % [
+  self.firstname,
+  self.lastname,
+  $self.birthDate,
+  $self.classNum,
+  $self.classLet,
+  ]
+
+proc toUnix(date: string): int64 =
+  try:
+    return date.parse("dd'.'MM'.'YYYY").toTime.toUnix
+  except TimeParseError:
+    stderr.write(getCurrentExceptionMsg() & "\n")
+    return result
+
 proc rowToDirector(row: seq[string]): Director =
-  initDirector(a,row[0],row[1],row[2])
-  return a
+  Director(firstname: row[0],lastname: row[1],birthdate: toUnix(row[2]))
 
 proc readDirectors(file: string): seq[Director] =
   var parser: CsvParser
-  var res: seq[Director]
   parser.open(file)
   parser.readHeaderRow()
-  while  parser.readRow:
-    res.add(rowToDirector(parser.row))
-  parser.close
-  return res
+  while  parser.readRow():
+    result.add(rowToDirector(parser.row))
+  parser.close()
+  return result
 
 proc rowToStudent(row: seq[string]): Student =
-  initStudent(a,row[0],row[1],row[2],@row[4][0],row[3].parseInt)
-  return a
+  Student(firstname: row[0],lastname: row[1],birthdate: toUnix(row[2]) ,classLet: @row[4][0],classNum: row[3].parseInt)
 
 proc readStudents(file: string): seq[Student] =
   var parser: CsvParser
-  var res: seq[Student]
   parser.open(file)
   parser.readHeaderRow()
-  while  parser.readRow:
-    res.add(rowToStudent(parser.row))
-  parser.close
-  return res
+  while  parser.readRow():
+    result.add(rowToStudent(parser.row))
+  parser.close()
+  return result
 
 proc rowToTeacher(row: seq[string]): Teacher =
-  initTeacher(a,row[0],row[1],row[3],row[2])
-  return a
+  Teacher(firstname: row[0],lastname: row[1],birthdate: toUnix(row[2]), subject: parseEnum[Subjects](row[3]))
 
 proc readTeachers(file: string): seq[Teacher] =
   var parser: CsvParser
-  var res: seq[Teacher]
   parser.open(file)
   parser.readHeaderRow()
-  while  parser.readRow:
-    res.add(rowToTeacher(parser.row))
-  parser.close
-  return res
+  while  parser.readRow():
+    result.add(rowToTeacher(parser.row))
+  parser.close()
+  return result
 
 proc createTable(db: DbConn, tableName: string,fields: varargs[string]) =
   let query = """
@@ -60,43 +102,35 @@ proc createTable(db: DbConn, tableName: string,fields: varargs[string]) =
   )""" % [tableName,fields.join(",")]
   db.exec(sql(query))
 
-proc insert(db: DbConn,tableName,fields: string,values: varargs[string,`$`]): int64 = 
-  let query = "INSERT INTO $1 ($2) VALUES $3" % [tableName,fields,values.join(",")]
+proc insert(db: DbConn,tableName,fields: string,values: seq): int64 = 
+  let query = "INSERT INTO $1 ($2) VALUES $3" % [tableName,fields,values.mapIt($it).join(",")]
   db.tryInsertID(sql(query))
 
-template insertAll(db: DbConn,tableName,fields: string, data: seq[auto]) =
-  for el in data:
-    if db.insert(tableName,fields,el) == -1:
-      echo "Error:",el
-  
 
 when isMainModule:
   let db = open("school.db", "", "", "")
-  let director = readDirectors("data/school_direcor.csv")
   db.createTable(
     "Director",
     "firstname VARCHAR(25)",
     "lastname VARCHAR(25)",
-    "birthdate VARCHAR(12)"
+    "birthdate UNSIGNED INTEGER"
     )
-  insertAll(db,"Director","firstname, lastname, birthdate",director)
-  let students = readStudents("data/school_students.csv")
+  echo db.insert("Director","firstname, lastname, birthdate",readDirectors("data/school_direcor.csv"))
   db.createTable(
     "Student",
     "firstname VARCHAR(25)",
     "lastname VARCHAR(25)",
-    "classnum UNSIGNED INTEHER",
-    "classlet VARCHAR(1)",
-    "birthdate VARCHAR(12)"
+    "birthdate UNSIGNED INTEGER",
+    "classnum UNSIGNED INTEGER",
+    "classlet VARCHAR(1)"
     )
-  insertAll(db,"Student","firstname, lastname, classnum, classlet, birthdate",students)
-  let teachers = readTeachers("data/school_teachers.csv")
+  echo db.insert("Student","firstname, lastname, birthdate, classnum, classlet",readStudents("data/school_students.csv"))
   db.createTable(
     "Teacher",
     "firstname VARCHAR(25)",
     "lastname VARCHAR(25)",
+    "birthdate UNSIGNED INTEGER",
     "subject VARCHAR(25)",
-    "birthdate VARCHAR(12)"
     )
-  insertAll(db,"Teacher","firstname, lastname, subject, birthdate",teachers)
+  echo db.insert("Teacher","firstname, lastname, birthdate, subject",readTeachers("data/school_teachers.csv"))
   db.close()
