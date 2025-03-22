@@ -1,12 +1,7 @@
-import parsecsv,strutils,times,sequtils  # используйте для чтения ваших csv файлов
-import db_connector/db_sqlite  # или norm/[model, sqlite]
+import parsecsv,strutils,times,sequtils,logging 
+import db_connector/db_sqlite  
+import time_logger
 
-
-# Реализуйте функции чтения и преобразования csv записи
-# в соответствующий объект или модель.
-
-# Создайте таблицы в базе данных.
-# Реализуйте загрузку экземпляра объекта в соответствующую таблицу.
 type
   Post* = enum
     NONE, Кассир, Уборщик, Консультант, Менеджер, Директор
@@ -22,7 +17,7 @@ type
     price*: float
     endDate*: int64
     discount*: float
-    count*: int
+    count*: int64
 
   Cash* = ref object of RootObj
     number*: int
@@ -30,9 +25,9 @@ type
     totalCash*: float
 
   Shop* = ref object of RootObj
-    staff*: seq[Staff]
-    goods*: seq[Good]
-    cashes*: seq[Cash]
+    staff*: int64
+    goods*: int64
+    cashes*: int64
 
 proc `$`*(self: Staff): string =
   "('$1', '$2', $3, '$4')" % [
@@ -52,15 +47,20 @@ proc `$`*(self: Good): string =
   ]
 
 proc `$`*(self: Cash): string =
-  var status: int
+  var status = 0
   if self.free:
     status = 1
-  else:
-    status = 0
   "($1, $2, $3)" % [
     $self.number,
     $status,
     $self.totalCash
+  ]
+
+proc `$`*(self: Shop): string =
+  "($1, $2, $3)" % [
+    $self.staff,
+    $self.goods,
+    $self.cashes
   ]
 
 proc toUnix(date: string): int64 =
@@ -113,12 +113,28 @@ proc createTable(db: DbConn, tableName: string,fields: varargs[string]) =
   )""" % [tableName,fields.join(",")]
   db.exec(sql(query))
 
-proc insert(db: DbConn,tableName,fields: string,values: seq): int64 = 
+proc insert(db: DbConn,logger: TimedRollingFileHandler, tableName,fields: string,values: seq): int = 
   let query = "INSERT INTO $1 ($2) VALUES $3" % [tableName,fields,values.mapIt($it).join(",")]
-  db.tryInsertID(sql(query))
+  let flag =  db.tryInsertID(sql(query))
+  if flag > 0:
+    logger.log(lvlInfo,"""Successfully added $1 lines in "$2" table""" % [$len(values),tableName])
+    return len(values)
+  else:
+    logger.log(lvlWarn,"""Failed to add $1 lines in "$2" table""" % [$len(values),tableName])
+    return 0
+  
 
 when isMainModule:
   let db = open("shop.db", "", "", "")
+  var shop = Shop(staff: 0,goods: 0, cashes: 0)
+  var logger = newTimedRotatingFileHandler(
+    filePath= "logs/app_shop.log",
+    whenInterval='M',
+    interval=1,
+    backupCount=3,
+    fmtStr="[$date $time][$levelname] "
+  )
+
   db.createTable(
     "Staff",
     "firstname VARCHAR(25)",
@@ -126,7 +142,7 @@ when isMainModule:
     "birthdate UNSIGNED INTEGER",
     "post VARCHAR(25)"
     )
-  echo db.insert("Staff","firstname, lastname, birthdate,post",readStaff("data/shop_staff.csv"))
+  shop.staff += db.insert(logger,"Staff","firstname, lastname, birthdate,post",readStaff("data/shop_staff.csv"))
   db.createTable(
     "Good",
     "title VARCHAR(80)",
@@ -135,12 +151,19 @@ when isMainModule:
     "discount UNSIGNED FLOAT",
     "count UNSIGNED INTEGER"
     )
-  echo db.insert("Good","title, price, enddate, discount, count",readGoods("data/shop_goods.csv"))
+  shop.goods += db.insert(logger,"Good","title, price, enddate, discount, count",readGoods("data/shop_goods.csv"))
   db.createTable(
     "Cash",
     "number UNSIGNED INTEGER",
     "free BOOLEAN",
     "totalcash UNSIGNED FLOAT",
     )
-  echo db.insert("Cash","number, free, totalcash",readCash("data/shop_cashes.csv"))
+  shop.cashes += db.insert(logger,"Cash","number, free, totalcash",readCash("data/shop_cashes.csv"))
+  db.createTable(
+    "Shop",
+    "staffnumber UNSIGNED INTEGER",
+    "goodsnumber UNSIGNED INTEGER",
+    "cashesnumber UNSIGNED INTEGER",
+    )
+  let k = db.insert(logger,"Shop","staffnumber, goodsnumber, cashesnumber",@[shop])
   db.close()

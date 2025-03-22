@@ -1,13 +1,6 @@
-import parsecsv,re,strutils,times,sequtils  # используйте для чтения ваших csv файлов
-import db_connector/db_sqlite  # или norm/[model, sqlite]
-
-
-  
-# Реализуйте функции чтения и преобразования csv записи
-# в соответствующий объект или модель.
-
-# Создайте таблицы в базе данных.
-# Реализуйте загрузку экземпляра объекта в соответствующую таблицу.
+import parsecsv,strutils,times,sequtils,logging
+import db_connector/db_sqlite
+import time_logger
 
 type
   Subjects* = enum
@@ -23,9 +16,9 @@ type
     classNum*: int
     classLet*: char
   School* = ref object of RootObj
-    director*: Director
-    students*: seq[Student]
-    teachers*: seq[Teacher]
+    director*: int
+    students*: int
+    teachers*: int
 
 proc `$`*(self: Director): string = 
   "('$1', '$2', $3)" % [
@@ -49,6 +42,13 @@ proc `$`*(self: Student): string =
   $self.birthDate,
   $self.classNum,
   $self.classLet,
+  ]
+
+proc `$`*(self: School): string =
+  "($1, $2, $3)" % [
+    $self.director,
+    $self.students,
+    $self.teachers
   ]
 
 proc toUnix(date: string): int64 =
@@ -102,20 +102,33 @@ proc createTable(db: DbConn, tableName: string,fields: varargs[string]) =
   )""" % [tableName,fields.join(",")]
   db.exec(sql(query))
 
-proc insert(db: DbConn,tableName,fields: string,values: seq): int64 = 
+proc insert(db: DbConn,logger: TimedRollingFileHandler, tableName,fields: string,values: seq): int = 
   let query = "INSERT INTO $1 ($2) VALUES $3" % [tableName,fields,values.mapIt($it).join(",")]
-  db.tryInsertID(sql(query))
-
+  let flag =  db.tryInsertID(sql(query))
+  if flag > 0:
+    logger.log(lvlInfo,"""Successfully added $1 lines in "$2" table""" % [$len(values),tableName])
+    return len(values)
+  else:
+    logger.log(lvlWarn,"""Failed to add $1 lines in "$2" table""" % [$len(values),tableName])
+    return 0
 
 when isMainModule:
   let db = open("school.db", "", "", "")
+  var school = School(director: 0,students: 0, teachers: 0)
+  var logger = newTimedRotatingFileHandler(
+    filePath= "logs/app_school.log",
+    whenInterval='M',
+    interval=1,
+    backupCount=3,
+    fmtStr="[$date $time][$levelname] "
+  )
   db.createTable(
     "Director",
     "firstname VARCHAR(25)",
     "lastname VARCHAR(25)",
     "birthdate UNSIGNED INTEGER"
     )
-  echo db.insert("Director","firstname, lastname, birthdate",readDirectors("data/school_direcor.csv"))
+  school.director += db.insert(logger,"Director","firstname, lastname, birthdate",readDirectors("data/school_direcor.csv"))
   db.createTable(
     "Student",
     "firstname VARCHAR(25)",
@@ -124,7 +137,7 @@ when isMainModule:
     "classnum UNSIGNED INTEGER",
     "classlet VARCHAR(1)"
     )
-  echo db.insert("Student","firstname, lastname, birthdate, classnum, classlet",readStudents("data/school_students.csv"))
+  school.students += db.insert(logger,"Student","firstname, lastname, birthdate, classnum, classlet",readStudents("data/school_students.csv"))
   db.createTable(
     "Teacher",
     "firstname VARCHAR(25)",
@@ -132,5 +145,12 @@ when isMainModule:
     "birthdate UNSIGNED INTEGER",
     "subject VARCHAR(25)",
     )
-  echo db.insert("Teacher","firstname, lastname, birthdate, subject",readTeachers("data/school_teachers.csv"))
+  school.teachers += db.insert(logger,"Teacher","firstname, lastname, birthdate, subject",readTeachers("data/school_teachers.csv"))
+  db.createTable(
+    "School",
+    "directornumber UNSIGNED INTEGER",
+    "studentnumber UNSIGNED INTEGER",
+    "teachernumber UNSIGNED INTEGER",
+    )
+  let k = db.insert(logger,"School","directornumber, studentnumber, teachernumber",@[school])
   db.close()

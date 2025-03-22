@@ -1,12 +1,6 @@
-import parsecsv,strutils,times,sequtils  # используйте для чтения ваших csv файлов
-import db_connector/db_sqlite  # или norm/[model, sqlite]
-
-
-# Реализуйте функции чтения и преобразования csv записи
-# в соответствующий объект или модель.
-
-# Создайте таблицы в базе данных.
-# Реализуйте загрузку экземпляра объекта в соответствующую таблицу.
+import parsecsv,strutils,times,sequtils,logging
+import db_connector/db_sqlite 
+import time_logger
 
 type
   Role* = enum
@@ -26,9 +20,9 @@ type
     name*: string
     age*: int 
   Shelter* = ref object of RootObj
-    staff*: seq[Staff]
-    pet*: seq[Pet]
-    manager*: seq[Manager]
+    staff*: int
+    pet*: int
+    manager*: int
 
 proc `$`*(self: Manager): string = 
   var glavn = 0
@@ -54,6 +48,13 @@ proc `$`*(self: Pet): string =
   return "('$1', $2)" % [
   self.name,
   $self.age,
+  ]
+
+proc `$`*(self: Shelter): string =
+  "($1, $2, $3)" % [
+    $self.staff,
+    $self.pet,
+    $self.manager
   ]
 
 proc toUnix(date: string): int64 =
@@ -112,12 +113,26 @@ proc createTable(db: DbConn, tableName: string,fields: varargs[string]) =
   )""" % [tableName,fields.join(",")]
   db.exec(sql(query))
 
-proc insert(db: DbConn,tableName,fields: string,values: seq): int64 = 
+proc insert(db: DbConn,logger: TimedRollingFileHandler, tableName,fields: string,values: seq): int = 
   let query = "INSERT INTO $1 ($2) VALUES $3" % [tableName,fields,values.mapIt($it).join(",")]
-  db.tryInsertID(sql(query))
+  let flag =  db.tryInsertID(sql(query))
+  if flag > 0:
+    logger.log(lvlInfo,"""Successfully added $1 lines in "$2" table""" % [$len(values),tableName])
+    return len(values)
+  else:
+    logger.log(lvlWarn,"""Failed to add $1 lines in "$2" table""" % [$len(values),tableName])
+    return 0
 
 when isMainModule:
   let db = open("shelter.db", "", "", "")
+  var shelter = Shelter(staff: 0,pet: 0, manager: 0)
+  var logger = newTimedRotatingFileHandler(
+    filePath= "logs/app_shelter.log",
+    whenInterval='M',
+    interval=1,
+    backupCount=3,
+    fmtStr="[$date $time][$levelname] "
+  )
   db.createTable(
     "Manager",
     "firstname VARCHAR(25)",
@@ -126,13 +141,13 @@ when isMainModule:
     "post VARCHAR(12)",
     "glavn BOOLEAN"
     )
-  echo db.insert("Manager","firstname, lastname, birthdate, post, glavn",readManagers("data/shelter_managers.csv"))
+  shelter.manager += db.insert(logger,"Manager","firstname, lastname, birthdate, post, glavn",readManagers("data/shelter_managers.csv"))
   db.createTable(
     "Pet",
     "name VARCHAR(25)",
     "age UNSIGNED INTEGER"
     )
-  echo db.insert("Pet","name, age",readPets("data/shelter_pets.csv"))
+  shelter.pet += db.insert(logger,"Pet","name, age",readPets("data/shelter_pets.csv"))
   db.createTable(
     "Staff",
     "firstname VARCHAR(25)",
@@ -140,5 +155,12 @@ when isMainModule:
     "birthdate UNSIGNED INTEGER",
     "uid UNSIGNED INTEGER"
     )
-  echo db.insert("Staff","firstname, lastname, birthdate, uid",readStaff("data/shelter_staff.csv"))
+  shelter.staff += db.insert(logger,"Staff","firstname, lastname, birthdate, uid",readStaff("data/shelter_staff.csv"))
+  db.createTable(
+    "Shelter",
+    "staffnumber UNSIGNED INTEGER",
+    "petsnumber UNSIGNED INTEGER",
+    "managersnumber UNSIGNED INTEGER",
+    )
+  let k = db.insert(logger,"Shelter","staffnumber, petsnumber, managersnumber",@[shelter])
   db.close()
